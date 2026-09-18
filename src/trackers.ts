@@ -190,7 +190,7 @@ export function listTrackers(gh: Exec, label: string): Tracker[] {
   const out: Tracker[] = [];
   for (const kind of ["issue", "pr"] as const) {
     const r = gh([kind, "list", "--state", "open", "--label", label, "--limit", "500", "--json", "number,title,body,url"]);
-    if (!r.ok) throw new Error(`gh ${kind} list failed: ${r.err}`);
+    if (!r.ok) throw new Error(`gh ${kind} list failed: ${r.err} (tracker modes need issues and pull-requests read access)`);
     for (const t of JSON.parse(r.out || "[]") as { number: number; title: string; body?: string; url: string }[]) {
       const key = readMarker(t.body ?? "");
       if (key) out.push({ kind, key, number: t.number, title: t.title, body: t.body ?? "", url: t.url });
