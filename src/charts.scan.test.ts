@@ -27,7 +27,30 @@ describe("scanManifests", () => {
     const { sources, warnings } = await scanManifests(dir);
     expect(sources).toEqual([]);
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toStartWith(`${dir}/broken.yaml:`);
+    expect(warnings[0].file).toBe(`${dir}/broken.yaml`);
+    expect(warnings[0].message.length).toBeGreaterThan(0);
+  });
+
+  test("prefilter tolerates a trailing comment on the kind line", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "scan-"));
+    await Bun.write(
+      `${dir}/app.yaml`,
+      [
+        "apiVersion: argoproj.io/v1alpha1",
+        "kind: Application # argo",
+        "metadata:",
+        "  name: reloader",
+        "spec:",
+        "  source:",
+        "    chart: reloader",
+        "    repoURL: https://stakater.github.io/stakater-charts",
+        "    targetRevision: 1.0.5",
+        "",
+      ].join("\n"),
+    );
+    const { sources, warnings } = await scanManifests(dir);
+    expect(warnings).toEqual([]);
+    expect(sources).toHaveLength(1);
   });
 });
 
