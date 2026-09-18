@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { ChartResult } from "./charts";
 import {
   applyOps,
+  ensureLabels,
   listTrackers,
   marker,
   planTrackers,
@@ -59,6 +60,18 @@ describe("listTrackers", () => {
   test("throws when gh cannot list", () => {
     const { exec } = fakeExec([[/list/, false]]);
     expect(() => listTrackers(exec, "helm-update")).toThrow(/gh issue list failed/);
+  });
+});
+
+describe("ensureLabels", () => {
+  test("ignores 'already exists' and reports any other failure", () => {
+    const gh: Exec = (args) =>
+      args[2] === "helm-update"
+        ? { ok: false, out: "", err: 'label with name "helm-update" already exists; use `--force` to update its color and description' }
+        : args[2] === "deps"
+          ? { ok: false, out: "", err: "HTTP 403: Resource not accessible by integration" }
+          : { ok: true, out: "", err: "" };
+    expect(ensureLabels(gh, ["helm-update", "deps", "fresh"])).toEqual(['label "deps": HTTP 403: Resource not accessible by integration']);
   });
 });
 
