@@ -1,0 +1,19 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cert-manager
+spec:
+  source:
+    chart: cert-manager
+    repoURL: https://charts.jetstack.io
+    targetRevision: 1.14.*
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: plain-git-app
+spec:
+  source:
+    repoURL: https://github.com/example/app.git
+    path: deploy
+    targetRevision: HEAD
