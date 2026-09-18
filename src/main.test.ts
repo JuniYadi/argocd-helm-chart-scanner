@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import type { ChartResult } from "./charts";
-import { readInputs, renderSummary } from "./main";
+import type { ChartResult, ChartSource } from "./charts";
+import { readState, updateChangelog, type State } from "./changelog";
+import { cmdEscape, cmdProp, nextState, readInputs, renderSummary, scopeOf } from "./main";
 
 describe("readInputs", () => {
   test("defaults to report-only", () => {
@@ -65,5 +66,67 @@ describe("renderSummary", () => {
     expect(md).toContain("All Helm charts are up to date.");
     expect(md).not.toContain("### Updates");
     expect(md).not.toContain("Errors and skipped");
+  });
+});
+
+describe("scopeOf", () => {
+  test('"." accepts anything', () => {
+    const inScope = scopeOf(".");
+    expect(inScope("tools/a.yaml#x/y")).toBe(true);
+    expect(inScope("anything#a/b")).toBe(true);
+  });
+
+  test("a path accepts its own keys and rejects look-alike siblings", () => {
+    const inScope = scopeOf("tools");
+    expect(inScope("tools/a.yaml#x/y")).toBe(true);
+    expect(inScope("tools-preview/a.yaml#x/y")).toBe(false);
+  });
+});
+
+describe("nextState", () => {
+  const src = (key: string, current: string): ChartSource => {
+    const [file, rest] = key.split("#");
+    const [app, chart] = rest.split("/");
+    return { key, file, app, chart, repoURL: "https://x.example", current };
+  };
+
+  test("keeps out-of-scope entries, drops vanished in-scope entries, adds/updates scanned ones", () => {
+    const prev: State = {
+      "other/a.yaml#a/a": "1.0.0",
+      "tools/gone.yaml#g/g": "1.0.0",
+      "tools/x.yaml#x/x": "1.0.0",
+    };
+    const sources = [src("tools/x.yaml#x/x", "2.0.0"), src("tools/y.yaml#y/y", "1.0.0")];
+    expect(nextState(prev, sources, scopeOf("tools"))).toEqual({
+      "other/a.yaml#a/a": "1.0.0",
+      "tools/x.yaml#x/x": "2.0.0",
+      "tools/y.yaml#y/y": "1.0.0",
+    });
+  });
+
+  test("a null prev starts from an empty state", () => {
+    const sources = [src("tools/x.yaml#x/x", "1.0.0")];
+    expect(nextState(null, sources, scopeOf("tools"))).toEqual({ "tools/x.yaml#x/x": "1.0.0" });
+  });
+
+  test("end-to-end: scanning a second path never removes the first path's keys", () => {
+    const first = updateChangelog(null, nextState(null, [src("clusters/dev/a.yaml#a/a", "1.0.0")], scopeOf("clusters/dev")), "2026-09-19");
+    const state1 = readState(first.text)!;
+    const second = updateChangelog(
+      first.text,
+      nextState(state1, [src("clusters/prod/b.yaml#b/b", "1.0.0")], scopeOf("clusters/prod")),
+      "2026-09-19",
+    );
+    expect(second.changes.some((c) => c.kind === "removed")).toBe(false);
+  });
+});
+
+describe("cmdEscape / cmdProp", () => {
+  test("cmdEscape escapes %, \\r and \\n", () => {
+    expect(cmdEscape("50%\nnext")).toBe("50%25%0Anext");
+  });
+
+  test("cmdProp additionally escapes : and ,", () => {
+    expect(cmdProp("a:b,c")).toBe("a%3Ab%2Cc");
   });
 });
