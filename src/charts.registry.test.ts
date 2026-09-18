@@ -54,6 +54,18 @@ describe("fetchChart", () => {
     expect(calls).toHaveLength(4);
   });
 
+  test("ghcr.io derives sources from both the chart repo and the owner/seg2 repo", async () => {
+    const f = async () => Response.json({ tags: ["1.0.0"] });
+    const idx = await fetchChart("oci://ghcr.io/stefanprodan/charts", "podinfo", f);
+    expect(idx.sources).toEqual(["https://github.com/stefanprodan/podinfo", "https://github.com/stefanprodan/charts"]);
+  });
+
+  test("ghcr.io with only an owner segment derives a single source", async () => {
+    const f = async () => Response.json({ tags: ["1.0.0"] });
+    const idx = await fetchChart("oci://ghcr.io/stefanprodan", "podinfo", f);
+    expect(idx.sources).toEqual(["https://github.com/stefanprodan/podinfo"]);
+  });
+
   test("HTTP: versions, deprecated flag and sources", async () => {
     const index = [
       "apiVersion: v1",
@@ -84,6 +96,34 @@ describe("fetchChart", () => {
     expect((await fetchChart("https://flaky.example/charts", "c", f)).versions).toEqual(["1.0.0"]);
     expect((await fetchChart("https://flaky.example/charts", "c", f)).versions).toEqual(["1.0.0"]);
     expect(calls).toBe(2);
+  });
+
+  test("HTTP: a body read failure is reported as unreachable", async () => {
+    const f = async () => new Response(new ReadableStream({ start(c) { c.error(new Error("stalled")); } }));
+    await expect(fetchChart("https://stall.example", "c", f)).rejects.toThrow(
+      /^unreachable: https:\/\/stall\.example\/index\.yaml \(stalled\)$/,
+    );
+  });
+
+  test("HTTP: a YAML parse failure is reported as an invalid index", async () => {
+    const f = async () => new Response("entries: [unclosed");
+    await expect(fetchChart("https://badyaml.example", "c", f)).rejects.toThrow(
+      /^invalid index\.yaml at https:\/\/badyaml\.example\/index\.yaml: /,
+    );
+  });
+});
+
+describe("fetchChart OCI 401", () => {
+  test("a 401 that survives the token retry is reported as a private registry", async () => {
+    const f = async (input: string | URL) => {
+      const url = String(input);
+      if (url.startsWith("https://auth.example/private-token")) return Response.json({ token: "t" });
+      return new Response("", {
+        status: 401,
+        headers: { "www-authenticate": 'Bearer realm="https://auth.example/private-token",service="reg",scope="repository:org/priv:pull"' },
+      });
+    };
+    await expect(fetchChart("oci://reg.example/org", "priv", f)).rejects.toThrow(/\(private registries are not supported\)$/);
   });
 });
 
