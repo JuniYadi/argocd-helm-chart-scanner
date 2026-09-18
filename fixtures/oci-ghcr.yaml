@@ -1,0 +1,9 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: podinfo
+spec:
+  source:
+    chart: podinfo
+    repoURL: oci://ghcr.io/stefanprodan/charts
+    targetRevision: 6.0.0
