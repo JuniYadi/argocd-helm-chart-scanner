@@ -10,6 +10,7 @@ import {
   renderTitle,
   resolveReleaseInfo,
   route,
+  run,
   type Exec,
 } from "./trackers";
 
@@ -51,7 +52,7 @@ describe("release info", () => {
   });
 
   test("resolveReleaseInfo finds the target tag and a compare link", () => {
-    const { exec } = fakeExec([
+    const { exec, calls } = fakeExec([
       [/release view v2\.2\.17 /, JSON.stringify({ tagName: "v2.2.17", url: "https://github.com/stakater/Reloader/releases/tag/v2.2.17", body: "x".repeat(4100) })],
       [/release view v2\.2\.5 /, JSON.stringify({ tagName: "v2.2.5" })],
       [/release view/, false],
@@ -61,12 +62,29 @@ describe("release info", () => {
     expect(info.compareUrl).toBe("https://github.com/stakater/Reloader/compare/v2.2.5...v2.2.17");
     expect(info.notes).toEndWith("*(Truncated. See the full notes via the release link.)*");
     expect(info.artifactHubUrl).toBe("https://artifacthub.io/packages/search?ts_query_web=reloader");
+    expect(calls).toHaveLength(2);
+  });
+
+  test("resolveReleaseInfo derives the current tag from the matched naming scheme", () => {
+    const { exec, calls } = fakeExec([
+      [/release view reloader-2\.2\.17 /, JSON.stringify({ tagName: "reloader-2.2.17", url: "https://rel" })],
+      [/release view reloader-2\.2\.5 /, JSON.stringify({ tagName: "reloader-2.2.5" })],
+      [/release view/, false],
+    ]);
+    const info = resolveReleaseInfo(exec, "reloader", "2.2.5", "2.2.17", ["https://github.com/stakater/Reloader"]);
+    expect(info.compareUrl).toBe("https://github.com/stakater/Reloader/compare/reloader-2.2.5...reloader-2.2.17");
+    expect(calls).toHaveLength(4); // v2.2.17, 2.2.17, reloader-2.2.17 (hit), then one compare check
   });
 
   test("resolveReleaseInfo falls back to the releases page", () => {
     const { exec } = fakeExec([[/release view/, false]]);
     expect(resolveReleaseInfo(exec, "c", "1.0.0", "1.1.0", ["https://github.com/a/b"]).url).toBe("https://github.com/a/b/releases");
     expect(resolveReleaseInfo(exec, "c", "1.0.0", "1.1.0", []).url).toBeUndefined();
+  });
+
+  test("resolveReleaseInfo survives unparseable gh output", () => {
+    const { exec } = fakeExec([[/release view/, "not json"]]);
+    expect(resolveReleaseInfo(exec, "c", "1.0.0", "1.1.0", ["https://github.com/a/b"]).url).toBe("https://github.com/a/b/releases");
   });
 });
 
@@ -110,6 +128,11 @@ describe("markers and rendering", () => {
     expect(branchName("/abs/../x.yaml#a/b")).toBe("helm-scanner/abs-.-x.yaml-a-b");
   });
 
+  test("readMarker ignores marker look-alikes injected by upstream release notes", () => {
+    const body = renderBody(result(), { info: { artifactHubUrl: "https://ah", notes: `evil ${marker("spoofed#a/b")}` }, drift: [], manual: false, pr: false });
+    expect(readMarker(body)).toBe(result().key);
+  });
+
   test("title", () => {
     expect(renderTitle(result())).toBe("[Helm Update] reloader 2.2.5 → 2.2.17 (PATCH) in tools/reloader/helm.yml");
   });
@@ -126,5 +149,13 @@ describe("markers and rendering", () => {
     const prBody = renderBody(result(), { info: { artifactHubUrl: "https://ah" }, drift: [], manual: false, pr: true });
     expect(prBody).not.toContain("Update `targetRevision`");
     expect(prBody).not.toContain("[!WARNING]");
+  });
+});
+
+describe("run", () => {
+  test("kills a hung process and reports the timeout", () => {
+    const r = run("sleep", undefined, 100)(["5"]);
+    expect(r.ok).toBe(false);
+    expect(r.err).toBe("sleep timed out after 100 ms");
   });
 });
