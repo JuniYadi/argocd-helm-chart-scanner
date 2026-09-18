@@ -5,7 +5,7 @@ Find outdated Helm charts in your ArgoCD `Application` manifests. Route each upd
 - **Zero config, read-only by default.** One step gives you a job summary of every outdated chart.
 - **Routing per update type.** For example, send major/minor updates to issues for human review and patch updates (CVE fixes) to PRs.
 - **No noise.** Exactly one open issue *or* PR per chart source. It is updated in place when a newer version ships and closed automatically once you upgrade.
-- **Audit trail.** `HELM_CHANGELOG.md` records upgrades, downgrades, additions and removals, with release-notes links.
+- **Audit trail.** `HELM_CHANGELOG.md` records upgrades, downgrades, additions, removals and non-semver changes, with release-notes links.
 - **Insights.** Flags charts deprecated upstream and the same chart pinned to different versions across environments.
 - **Any public registry, no extra tools.** Helm HTTP repositories and OCI registries (`ghcr.io`, Docker Hub, `public.ecr.aws`, …), with or without `oci://`.
 
@@ -107,8 +107,10 @@ When both `issue-types` and `pr-types` are empty, the action only reports.
 | Mode | Permissions |
 |---|---|
 | Report only | `contents: read` |
-| Issues | `contents: read`, `issues: write` |
-| PRs | `contents: write`, `pull-requests: write` (plus `issues: write` if you also use issues) |
+| Issues | `contents: read`, `issues: write`, `pull-requests: read` |
+| PRs (with or without issues) | `contents: write`, `issues: write`, `pull-requests: write` |
+
+Tracker modes always read both issues and PRs, so each chart source keeps a single tracker even when you switch between issue and PR routing. Labels are created through the issues API.
 
 ## How tracking works
 
