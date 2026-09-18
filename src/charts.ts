@@ -147,7 +147,10 @@ async function fetchHttpIndex(repoURL: string, chart: string, f: Fetch): Promise
         }
         if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
         return Bun.YAML.parse(await res.text());
-      })(),
+      })().catch((err) => {
+        indexCache.delete(url); // a failed fetch must not poison later charts on the same repo
+        throw err;
+      }),
     );
   }
   const index = await indexCache.get(url)!;
