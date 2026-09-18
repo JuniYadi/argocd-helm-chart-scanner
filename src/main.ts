@@ -1,7 +1,7 @@
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { relative, resolve } from "node:path";
-import { checkSource, findDrift, scanManifests, type ChartResult, type DriftGroup } from "./charts";
-import { diffState, readState, updateChangelog, type ChangeLinks } from "./changelog";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, relative, resolve } from "node:path";
+import { checkSource, findDrift, scanManifests, type ChartResult, type ChartSource, type DriftGroup } from "./charts";
+import { diffState, readState, updateChangelog, type ChangeLinks, type State } from "./changelog";
 import {
   applyOps,
   editTargetRevision,
@@ -60,6 +60,23 @@ export function readInputs(env: Record<string, string | undefined>): Inputs {
   };
 }
 
+/** A run over `dir` only owns tracker keys and changelog entries under that path. */
+export const scopeOf = (dir: string): ((key: string) => boolean) =>
+  dir === "." ? () => true : (key: string) => key.startsWith(`${dir}/`);
+
+/** Out-of-scope entries survive untouched; in-scope entries are replaced by this run's scan. */
+export function nextState(prev: State | null, sources: ChartSource[], inScope: (key: string) => boolean): State {
+  const state: State = {};
+  for (const [key, current] of Object.entries(prev ?? {})) if (!inScope(key)) state[key] = current;
+  for (const s of sources) state[s.key] = s.current;
+  return state;
+}
+
+/** Escapes a workflow command message per the `::warning::`/`::error::` data escaping rules. */
+export const cmdEscape = (s: string) => s.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+/** Escapes a workflow command property value: `cmdEscape` plus `:` and `,`. */
+export const cmdProp = (s: string) => cmdEscape(s).replace(/:/g, "%3A").replace(/,/g, "%2C");
+
 const cell = (s: string) => s.replace(/\|/g, "\\|").replace(/\n/g, " ");
 
 export function renderSummary(results: ChartResult[], drift: DriftGroup[], actions: Map<string, Action>, urls: Map<string, string>): string {
@@ -117,7 +134,7 @@ async function main() {
   const dir = relative(cwd, resolve(cwd, inputs.path)) || ".";
 
   const { sources, warnings } = await scanManifests(dir);
-  for (const w of warnings) console.log(`::warning::${w}`);
+  for (const w of warnings) console.log(`::warning file=${cmdProp(w.file)}::${cmdEscape(w.message)}`);
   console.log(`Found ${sources.length} Helm chart source(s) under ${dir}.`);
 
   const results: ChartResult[] = [];
@@ -136,7 +153,7 @@ async function main() {
   for (const r of results.filter(isOutdated)) actions.set(r.key, route(r.type, inputs.issueTypes, inputs.prTypes));
 
   if (inputs.issueTypes.size || inputs.prTypes.size) {
-    for (const w of ensureLabels(gh, inputs.labels)) console.log(`::warning::${w}`);
+    for (const w of ensureLabels(gh, inputs.labels)) console.log(`::warning::${cmdEscape(w)}`);
     const open = listTrackers(gh, inputs.labels[0]);
     const items: Planned[] = [];
     for (const r of results.filter(isOutdated)) {
@@ -159,21 +176,28 @@ async function main() {
     }
 
     let base: string | undefined;
-    const outcome = applyOps(planTrackers(items, open, results), {
+    const outcome = applyOps(planTrackers(items, open, results, scopeOf(dir)), {
       gh,
       git: run("git", cwd),
       labels: inputs.labels,
       token: inputs.token,
       serverUrl: process.env.GITHUB_SERVER_URL ?? "https://github.com",
-      baseBranch: () => (base ??= gh(["repo", "view", "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]).out),
+      baseBranch: () => {
+        if (base === undefined) {
+          const r = gh(["repo", "view", "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]);
+          if (!r.ok || !r.out) throw new Error(`could not determine the default branch: ${r.err || "empty output from gh repo view"}`);
+          base = r.out;
+        }
+        return base;
+      },
     });
     outcome.urls.forEach((u, k) => urls.set(k, u));
     resolved = outcome.resolved;
     for (const e of outcome.errors) {
       if (e.includes(PR_PERMISSION_HINT)) {
-        console.log(`::error::${e}`);
+        console.log(`::error::${cmdEscape(e)}`);
         failed = true;
-      } else console.log(`::warning::${e}`);
+      } else console.log(`::warning::${cmdEscape(e)}`);
     }
   }
 
@@ -181,8 +205,8 @@ async function main() {
   if (inputs.changelogFile) {
     const file = inputs.changelogFile;
     const existing = existsSync(file) ? readFileSync(file, "utf8") : null;
-    const state = Object.fromEntries(sources.map((s) => [s.key, s.current]));
     const prev = existing === null ? null : readState(existing);
+    const state = nextState(prev, sources, scopeOf(dir));
     const links = new Map<string, ChangeLinks>();
     for (const c of prev ? diffState(prev, state) : []) {
       const link: ChangeLinks = { closes: resolved.get(c.key) };
@@ -195,6 +219,7 @@ async function main() {
     }
     const out = updateChangelog(existing, state, new Date().toISOString().slice(0, 10), links);
     if (out.changed) {
+      mkdirSync(dirname(file), { recursive: true });
       writeFileSync(file, out.text);
       changelogUpdated = true;
       console.log(`Updated ${file} (${out.changes.length} new entr${out.changes.length === 1 ? "y" : "ies"}).`);
@@ -225,7 +250,7 @@ async function main() {
 
 if (import.meta.main) {
   main().catch((err) => {
-    console.log(`::error::${(err as Error).message}`);
+    console.log(`::error::${cmdEscape((err as Error).message)}`);
     process.exit(1);
   });
 }
