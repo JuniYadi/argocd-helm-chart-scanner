@@ -1,3 +1,6 @@
+import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ChartResult, DriftGroup, UpdateType } from "./charts";
 
 export interface ExecOptions {
@@ -170,4 +173,216 @@ export function renderBody(r: ChartResult, ctx: BodyContext): string {
   out.push(`- [ ] Verify the ArgoCD sync after merge`, ``);
   out.push(`*Managed by [ArgoCD Helm Chart Scanner](https://github.com/juniyadi/argocd-helm-chart-scanner).*`, marker(r.key));
   return out.join("\n");
+}
+
+// ---------- trackers ----------
+
+export interface Tracker {
+  kind: "issue" | "pr";
+  number: number;
+  key: string;
+  title: string;
+  body: string;
+  url: string;
+}
+
+export function listTrackers(gh: Exec, label: string): Tracker[] {
+  const out: Tracker[] = [];
+  for (const kind of ["issue", "pr"] as const) {
+    const r = gh([kind, "list", "--state", "open", "--label", label, "--limit", "500", "--json", "number,title,body,url"]);
+    if (!r.ok) throw new Error(`gh ${kind} list failed: ${r.err}`);
+    for (const t of JSON.parse(r.out || "[]") as { number: number; title: string; body?: string; url: string }[]) {
+      const key = readMarker(t.body ?? "");
+      if (key) out.push({ kind, key, number: t.number, title: t.title, body: t.body ?? "", url: t.url });
+    }
+  }
+  return out;
+}
+
+export function ensureLabels(gh: Exec, labels: string[]) {
+  // ponytail: "already exists" failures are expected and ignored; a real failure surfaces on issue/PR create.
+  for (const l of labels) gh(["label", "create", l, "--color", "0E8A16", "--description", "Managed by ArgoCD Helm Chart Scanner"]);
+}
+
+export interface Planned {
+  result: ChartResult;
+  action: "issue" | "pr" | "manual";
+  title: string;
+  body: string;
+  newText?: string;
+}
+
+export type Op =
+  | { kind: "create-issue"; key: string; title: string; body: string; supersede?: Tracker }
+  | { kind: "update-issue"; key: string; tracker: Tracker; title: string; body: string; supersede?: Tracker }
+  | { kind: "keep"; key: string; tracker: Tracker; supersede?: Tracker }
+  | {
+      kind: "upsert-pr";
+      key: string;
+      file: string;
+      newText: string;
+      message: string;
+      title: string;
+      body: string;
+      existing?: Tracker;
+      push: boolean;
+      supersede?: Tracker;
+    }
+  | { kind: "close"; key: string; tracker: Tracker; comment: string; resolved: boolean };
+
+const sameText = (a: string, b: string) => a.replace(/\r\n/g, "\n").trim() === b.replace(/\r\n/g, "\n").trim();
+
+export function planTrackers(items: Planned[], open: Tracker[], results: ChartResult[]): Op[] {
+  const ops: Op[] = [];
+  const byKey = new Map(results.map((r) => [r.key, r]));
+  const find = (key: string, kind: Tracker["kind"]) => open.find((t) => t.key === key && t.kind === kind);
+
+  for (const t of open) {
+    const r = byKey.get(t.key);
+    if (!r) ops.push({ kind: "close", key: t.key, tracker: t, comment: "Chart source no longer found in the scanned manifests.", resolved: false });
+    else if (r.type === "none") ops.push({ kind: "close", key: t.key, tracker: t, comment: `Upgraded to \`${r.current}\`.`, resolved: true });
+    // ponytail: errors/unknown leave trackers alone, so a flaky registry never closes an issue.
+  }
+
+  for (const it of items) {
+    const key = it.result.key;
+    const issue = find(key, "issue");
+    const pr = find(key, "pr");
+    if (it.action === "pr") {
+      const push = !pr || pr.title !== it.title;
+      if (pr && !push && sameText(pr.body, it.body)) {
+        ops.push({ kind: "keep", key, tracker: pr, supersede: issue });
+      } else {
+        ops.push({
+          kind: "upsert-pr",
+          key,
+          file: it.result.file,
+          newText: it.newText!,
+          message: `chore(helm): bump ${it.result.chart} to ${it.result.latest} in ${it.result.file}`,
+          title: it.title,
+          body: it.body,
+          existing: pr,
+          push,
+          supersede: issue,
+        });
+      }
+    } else if (issue && issue.title === it.title && sameText(issue.body, it.body)) {
+      ops.push({ kind: "keep", key, tracker: issue, supersede: pr });
+    } else if (issue) {
+      ops.push({ kind: "update-issue", key, tracker: issue, title: it.title, body: it.body, supersede: pr });
+    } else {
+      ops.push({ kind: "create-issue", key, title: it.title, body: it.body, supersede: pr });
+    }
+  }
+  return ops;
+}
+
+export const PR_PERMISSION_HINT =
+  'Enable "Allow GitHub Actions to create and approve pull requests" (Settings → Actions → General), or pass a PAT / GitHub App token via the `token` input.';
+
+export interface ApplyContext {
+  gh: Exec;
+  git: Exec;
+  labels: string[];
+  token: string;
+  serverUrl: string;
+  baseBranch: () => string;
+}
+
+export interface ApplyResult {
+  urls: Map<string, string>;
+  resolved: Map<string, number>;
+  errors: string[];
+}
+
+/** Commits `text` as `file` on top of HEAD into `branch` without touching the working tree or index. */
+export function pushBranch(ctx: ApplyContext, branch: string, file: string, text: string, message: string) {
+  const git = (what: string, args: string[], opts?: ExecOptions) => {
+    const r = ctx.git(args, opts);
+    if (!r.ok) throw new Error(`git ${what}: ${r.err}`);
+    return r.out;
+  };
+  const index = join(tmpdir(), `helm-scanner-${process.pid}-${Date.now()}.index`);
+  const env = { GIT_INDEX_FILE: index };
+  try {
+    const mode = git("ls-files", ["ls-files", "-s", "--", file]).split(" ")[0] || "100644";
+    const blob = git("hash-object", ["hash-object", "-w", "--stdin"], { input: text });
+    git("read-tree", ["read-tree", "HEAD"], { env });
+    git("update-index", ["update-index", "--cacheinfo", `${mode},${blob},${file}`], { env });
+    const tree = git("write-tree", ["write-tree"], { env });
+    const commit = git("commit-tree", [
+      "-c", "user.name=github-actions[bot]",
+      "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com",
+      "commit-tree", tree, "-p", "HEAD", "-m", message,
+    ]);
+    const header = `http.${ctx.serverUrl}/.extraheader`;
+    const auth = Buffer.from(`x-access-token:${ctx.token}`).toString("base64");
+    // The empty value resets headers inherited from actions/checkout before adding ours.
+    git("push", ["-c", `${header}=`, "-c", `${header}=AUTHORIZATION: basic ${auth}`, "push", "-q", "--force", "origin", `${commit}:refs/heads/${branch}`]);
+  } finally {
+    rmSync(index, { force: true });
+  }
+}
+
+export function applyOps(ops: Op[], ctx: ApplyContext): ApplyResult {
+  const res: ApplyResult = { urls: new Map(), resolved: new Map(), errors: [] };
+  const lastLine = (s: string) => s.split("\n").pop()!;
+  const close = (t: Tracker, comment: string) => {
+    const args =
+      t.kind === "pr"
+        ? ["pr", "close", String(t.number), "--comment", comment, "--delete-branch"]
+        : ["issue", "close", String(t.number), "--comment", comment];
+    const r = ctx.gh(args);
+    if (!r.ok) res.errors.push(`close ${t.kind} #${t.number}: ${r.err}`);
+    return r.ok;
+  };
+
+  for (const op of ops) {
+    try {
+      let number: number;
+      let url: string;
+      if (op.kind === "close") {
+        if (close(op.tracker, op.comment) && op.resolved) res.resolved.set(op.key, op.tracker.number);
+        continue;
+      } else if (op.kind === "keep") {
+        ({ number, url } = op.tracker);
+      } else if (op.kind === "update-issue") {
+        const r = ctx.gh(["issue", "edit", String(op.tracker.number), "--title", op.title, "--body-file", "-"], { input: op.body });
+        if (!r.ok) throw new Error(`gh issue edit #${op.tracker.number}: ${r.err}`);
+        ({ number, url } = op.tracker);
+      } else if (op.kind === "create-issue") {
+        const r = ctx.gh(["issue", "create", "--title", op.title, "--body-file", "-", "--label", ctx.labels.join(",")], { input: op.body });
+        if (!r.ok) throw new Error(`gh issue create: ${r.err}`);
+        url = lastLine(r.out);
+        number = Number(url.split("/").pop());
+      } else {
+        const branch = branchName(op.key);
+        if (op.push) pushBranch(ctx, branch, op.file, op.newText, op.message);
+        if (op.existing) {
+          const r = ctx.gh(["pr", "edit", String(op.existing.number), "--title", op.title, "--body-file", "-"], { input: op.body });
+          if (!r.ok) throw new Error(`gh pr edit #${op.existing.number}: ${r.err}`);
+          ({ number, url } = op.existing);
+        } else {
+          const r = ctx.gh(
+            ["pr", "create", "--base", ctx.baseBranch(), "--head", branch, "--title", op.title, "--body-file", "-", "--label", ctx.labels.join(",")],
+            { input: op.body },
+          );
+          if (!r.ok) {
+            throw new Error(
+              /not permitted to create or approve pull requests/i.test(r.err)
+                ? `GitHub Actions cannot create pull requests in this repository. ${PR_PERMISSION_HINT}`
+                : `gh pr create: ${r.err}`,
+            );
+          }
+          url = lastLine(r.out);
+          number = Number(url.split("/").pop());
+        }
+      }
+      res.urls.set(op.key, url);
+      if (op.supersede) close(op.supersede, `Superseded by #${number}.`);
+    } catch (err) {
+      res.errors.push(`${op.key}: ${(err as Error).message}`);
+    }
+  }
+  return res;
 }
