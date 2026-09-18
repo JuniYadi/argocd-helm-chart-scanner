@@ -199,9 +199,14 @@ export function listTrackers(gh: Exec, label: string): Tracker[] {
   return out;
 }
 
-export function ensureLabels(gh: Exec, labels: string[]) {
-  // ponytail: "already exists" failures are expected and ignored; a real failure surfaces on issue/PR create.
-  for (const l of labels) gh(["label", "create", l, "--color", "0E8A16", "--description", "Managed by ArgoCD Helm Chart Scanner"]);
+/** Creates missing labels; returns failures other than "already exists" as warnings. */
+export function ensureLabels(gh: Exec, labels: string[]): string[] {
+  const warnings: string[] = [];
+  for (const l of labels) {
+    const r = gh(["label", "create", l, "--color", "0E8A16", "--description", "Managed by ArgoCD Helm Chart Scanner"]);
+    if (!r.ok && !/already exists/i.test(r.err)) warnings.push(`label "${l}": ${r.err}`);
+  }
+  return warnings;
 }
 
 export interface Planned {
