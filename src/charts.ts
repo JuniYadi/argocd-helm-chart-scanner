@@ -108,3 +108,153 @@ export function findDrift(sources: ChartSource[]): DriftGroup[] {
   }
   return [...groups.values()].filter((g) => new Set(g.members.map((m) => m.current)).size > 1);
 }
+
+export interface ChartIndex {
+  versions: string[];
+  deprecated: Set<string>;
+  sources: string[]; // upstream URLs, used to find GitHub releases
+}
+
+export interface ChartResult extends ChartSource {
+  latest?: string;
+  type: UpdateType;
+  deprecated: boolean;
+  sources: string[];
+  error?: string;
+}
+
+type Fetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
+
+const TIMEOUT_MS = 15_000;
+const HEADERS = { "User-Agent": "argocd-helm-chart-scanner" };
+
+const indexCache = new Map<string, Promise<any>>();
+
+async function fetchHttpIndex(repoURL: string, chart: string, f: Fetch): Promise<ChartIndex> {
+  const url = repoURL.replace(/\/+$/, "") + "/index.yaml";
+  if (!indexCache.has(url)) {
+    indexCache.set(
+      url,
+      (async () => {
+        let res: Response;
+        try {
+          res = await f(url, { headers: HEADERS, signal: AbortSignal.timeout(TIMEOUT_MS) });
+        } catch (err) {
+          throw new Error(`unreachable: ${url} (${(err as Error).message}); repository moved or removed?`);
+        }
+        if (res.status === 404 || res.status === 410) {
+          throw new Error(`unreachable: HTTP ${res.status} from ${url}; repository moved or removed?`);
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
+        return Bun.YAML.parse(await res.text());
+      })(),
+    );
+  }
+  const index = await indexCache.get(url)!;
+  const entries: any[] = index?.entries?.[chart] ?? [];
+  if (entries.length === 0) throw new Error(`chart "${chart}" not found in ${url}`);
+
+  const sources = new Set<string>();
+  for (const e of entries) for (const s of e.sources ?? []) sources.add(s);
+  const home = entries.find((e) => e.home)?.home;
+  if (home) sources.add(home);
+  sources.add(repoURL);
+
+  return {
+    versions: entries.map((e) => String(e.version)),
+    deprecated: new Set(entries.filter((e) => e.deprecated === true).map((e) => String(e.version))),
+    sources: [...sources],
+  };
+}
+
+export function parseBearerChallenge(header: string | null) {
+  if (!header || !/^Bearer\s/i.test(header)) return null;
+  const params: Record<string, string> = {};
+  for (const m of header.matchAll(/(\w+)="([^"]*)"/g)) params[m[1].toLowerCase()] = m[2];
+  return params.realm ? { realm: params.realm, service: params.service, scope: params.scope } : null;
+}
+
+export function nextLink(header: string | null): string | null {
+  return header?.match(/<([^>]+)>\s*;\s*rel="?next"?/)?.[1] ?? null;
+}
+
+export function ociRepoParts(repoURL: string, chart: string) {
+  const repo = normalizeRepo(repoURL);
+  const slash = repo.indexOf("/");
+  let host = slash === -1 ? repo : repo.slice(0, slash);
+  const path = slash === -1 ? "" : repo.slice(slash + 1);
+  if (host === "docker.io") host = "registry-1.docker.io";
+  return { host, path, name: path ? `${path}/${chart}` : chart };
+}
+
+async function fetchOciTags(repoURL: string, chart: string, f: Fetch): Promise<ChartIndex> {
+  const { host, path, name } = ociRepoParts(repoURL, chart);
+  let url: string | null = `https://${host}/v2/${name}/tags/list?n=1000`;
+  let token: string | undefined;
+  const tags: string[] = [];
+
+  const get = (u: string) =>
+    f(u, {
+      headers: token ? { ...HEADERS, Authorization: `Bearer ${token}` } : HEADERS,
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+
+  for (let page = 0; url && page < 20; page++) {
+    let res: Response;
+    try {
+      res = await get(url);
+      if (res.status === 401 && !token) {
+        const challenge = parseBearerChallenge(res.headers.get("www-authenticate"));
+        if (!challenge) throw new Error(`HTTP 401 from ${url} without a Bearer challenge`);
+        const tokenURL = new URL(challenge.realm);
+        if (challenge.service) tokenURL.searchParams.set("service", challenge.service);
+        tokenURL.searchParams.set("scope", challenge.scope ?? `repository:${name}:pull`);
+        const tr = await f(tokenURL.toString(), { headers: HEADERS, signal: AbortSignal.timeout(TIMEOUT_MS) });
+        if (!tr.ok) throw new Error(`OCI token request failed: HTTP ${tr.status} from ${tokenURL.origin}`);
+        const tj = (await tr.json()) as { token?: string; access_token?: string };
+        token = tj.token ?? tj.access_token;
+        res = await get(url);
+      }
+    } catch (err) {
+      const msg = (err as Error).message;
+      throw new Error(msg.startsWith("OCI token") || msg.startsWith("HTTP 401") ? msg : `unreachable: ${host} (${msg})`);
+    }
+    if (res.status === 404) throw new Error(`unreachable: HTTP 404 from ${url}; chart moved or removed?`);
+    if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
+    const body = (await res.json()) as { tags?: string[] | null };
+    tags.push(...(body.tags ?? []));
+    const next = nextLink(res.headers.get("link"));
+    url = next ? new URL(next, url).toString() : null;
+  }
+
+  if (tags.length === 0) throw new Error(`no tags found for ${host}/${name}`);
+  const sources = host === "ghcr.io" && path ? [`https://github.com/${path.split("/").slice(0, 2).join("/")}`] : [];
+  return {
+    versions: tags.map((t) => t.replace(/_/g, "+")), // Helm stores "+" as "_" in OCI tags
+    deprecated: new Set(),
+    sources,
+  };
+}
+
+export function fetchChart(repoURL: string, chart: string, f: Fetch = fetch): Promise<ChartIndex> {
+  return /^https?:\/\//.test(repoURL) ? fetchHttpIndex(repoURL, chart, f) : fetchOciTags(repoURL, chart, f);
+}
+
+export async function checkSource(s: ChartSource, f: Fetch = fetch): Promise<ChartResult> {
+  const cur = parseSemver(s.current);
+  if (!cur) return { ...s, type: "unknown", deprecated: false, sources: [], error: "non-semver targetRevision" };
+  try {
+    const index = await fetchChart(s.repoURL, s.chart, f);
+    const latest = pickLatest(index.versions, Boolean(cur.pre));
+    if (!latest) return { ...s, type: "unknown", deprecated: false, sources: index.sources, error: "no compatible versions found" };
+    return {
+      ...s,
+      latest,
+      type: classify(s.current, latest),
+      deprecated: index.deprecated.has(latest),
+      sources: index.sources,
+    };
+  } catch (err) {
+    return { ...s, type: "unknown", deprecated: false, sources: [], error: (err as Error).message };
+  }
+}
