@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { ChartResult } from "./charts";
 import {
   branchName,
+  candidateTags,
   editTargetRevision,
   githubRepos,
   marker,
@@ -51,6 +52,12 @@ describe("release info", () => {
     ).toEqual(["stakater/Reloader", "kubernetes-sigs/external-dns"]);
   });
 
+  test("candidateTags appends chart-v and chart- prefixed tags after the existing candidates", () => {
+    const tags = candidateTags("reloader", "v2.2.17");
+    expect(tags[0]).toBe("v2.2.17");
+    expect(tags.slice(-2)).toEqual(["chart-v2.2.17", "chart-2.2.17"]);
+  });
+
   test("resolveReleaseInfo finds the target tag and a compare link with one call", () => {
     const releases = [
       { tag_name: "v2.2.17", html_url: "https://github.com/stakater/Reloader/releases/tag/v2.2.17", body: "x".repeat(4100) },
@@ -76,6 +83,24 @@ describe("release info", () => {
     expect(info.tag).toBe("reloader-2.2.17");
     expect(info.compareUrl).toBe("https://github.com/stakater/Reloader/compare/reloader-2.2.5...reloader-2.2.17");
     expect(calls).toHaveLength(1); // both tags already known from the one releases call
+  });
+
+  test("resolveReleaseInfo matches a chart-v prefixed release tag with one call", () => {
+    const releases = [
+      { tag_name: "v1.4.22", html_url: "https://github.com/stakater/Reloader/releases/tag/v1.4.22" },
+      {
+        tag_name: "chart-v2.2.17",
+        html_url: "https://github.com/stakater/Reloader/releases/tag/chart-v2.2.17",
+        body: "Chart release notes",
+      },
+      { tag_name: "chart-v2.2.5", html_url: "https://github.com/stakater/Reloader/releases/tag/chart-v2.2.5" },
+    ];
+    const { exec, calls } = fakeExec([[/^api repos\/stakater\/Reloader\/releases/, JSON.stringify(releases)]]);
+    const info = resolveReleaseInfo(exec, "reloader", "2.2.5", "2.2.17", ["https://github.com/stakater/Reloader"]);
+    expect(info.tag).toBe("chart-v2.2.17");
+    expect(info.url).toBe("https://github.com/stakater/Reloader/releases/tag/chart-v2.2.17");
+    expect(info.compareUrl).toBe("https://github.com/stakater/Reloader/compare/chart-v2.2.5...chart-v2.2.17");
+    expect(calls).toHaveLength(1);
   });
 
   test("resolveReleaseInfo falls back to the releases page when nothing matches", () => {
