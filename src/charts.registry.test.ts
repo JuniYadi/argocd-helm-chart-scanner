@@ -76,6 +76,15 @@ describe("fetchChart", () => {
     const f = async () => new Response("", { status: 404 });
     await expect(fetchChart("https://gone.example/charts", "x", f)).rejects.toThrow(/^unreachable: HTTP 404/);
   });
+
+  test("HTTP: a failed index fetch is retried, a successful one is cached", async () => {
+    let calls = 0;
+    const f = async () => (++calls === 1 ? new Response("", { status: 503 }) : new Response("entries:\n  c:\n    - version: 1.0.0\n"));
+    await expect(fetchChart("https://flaky.example/charts", "c", f)).rejects.toThrow("HTTP 503");
+    expect((await fetchChart("https://flaky.example/charts", "c", f)).versions).toEqual(["1.0.0"]);
+    expect((await fetchChart("https://flaky.example/charts", "c", f)).versions).toEqual(["1.0.0"]);
+    expect(calls).toBe(2);
+  });
 });
 
 describe("checkSource", () => {
