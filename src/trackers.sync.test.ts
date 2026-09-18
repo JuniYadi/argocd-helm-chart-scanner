@@ -114,6 +114,12 @@ describe("planTrackers", () => {
     expect(planTrackers([planned(r, "pr")], [issue], [r])[0]).toMatchObject({ kind: "upsert-pr", supersede: issue });
     expect(planTrackers([planned(r, "issue")], [pr], [r])[0]).toMatchObject({ kind: "create-issue", supersede: pr });
   });
+
+  test("a vanished tracker outside the scanned scope is left alone", () => {
+    const open = [tracker({ key: "other/x.yaml#a/c" })];
+    const ops = planTrackers([], open, [], (k) => k.startsWith("tools/"));
+    expect(ops).toEqual([]);
+  });
 });
 
 const ctx = (gh: Exec, git: Exec = fakeExec().exec): ApplyContext => ({
@@ -145,6 +151,41 @@ describe("applyOps", () => {
     );
     expect([...out.resolved]).toEqual([["a", 1]]);
     expect(out.errors).toEqual(["close issue #2: boom"]);
+  });
+
+  test("an unparseable issue number is reported instead of NaN", () => {
+    const { exec } = fakeExec([[/^issue create/, "garbage"]]);
+    const out = applyOps([{ kind: "create-issue", key: "k", title: "T", body: "B" }], ctx(exec));
+    expect(out.errors[0]).toContain("could not read the issue number");
+  });
+
+  test("update-issue edits in place and reuses the tracker's url", () => {
+    const t = tracker({ number: 5, url: "https://github.com/o/r/issues/5" });
+    const { exec, calls } = fakeExec([[/^issue edit/, ""]]);
+    const out = applyOps([{ kind: "update-issue", key: "k", tracker: t, title: "T", body: "B" }], ctx(exec));
+    expect(calls[0]).toEqual({ args: ["issue", "edit", "5", "--title", "T", "--body-file", "-"], input: "B" });
+    expect(out.urls.get("k")).toBe(t.url);
+  });
+
+  test("keep makes no gh call and reuses the tracker's url", () => {
+    const t = tracker({ number: 6, url: "https://github.com/o/r/issues/6" });
+    const { exec, calls } = fakeExec();
+    const out = applyOps([{ kind: "keep", key: "k", tracker: t }], ctx(exec));
+    expect(calls).toEqual([]);
+    expect(out.urls.get("k")).toBe(t.url);
+  });
+
+  test("upsert-pr with an existing PR and push:false edits in place without git calls", () => {
+    const existing = tracker({ kind: "pr", number: 9, url: "https://github.com/o/r/pull/9" });
+    const { exec: gh, calls: ghCalls } = fakeExec([[/^pr edit/, ""]]);
+    const { exec: git, calls: gitCalls } = fakeExec();
+    const out = applyOps(
+      [{ kind: "upsert-pr", key: "k", file: "f", newText: "x", message: "m", title: "T", body: "B", existing, push: false }],
+      ctx(gh, git),
+    );
+    expect(ghCalls[0]).toEqual({ args: ["pr", "edit", "9", "--title", "T", "--body-file", "-"], input: "B" });
+    expect(gitCalls).toEqual([]);
+    expect(out.urls.get("k")).toBe(existing.url);
   });
 
   test("PR permission failure yields the settings hint", () => {
