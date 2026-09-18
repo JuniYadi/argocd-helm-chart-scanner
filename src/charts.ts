@@ -1,3 +1,5 @@
+import { join } from "node:path";
+
 export type UpdateType = "major" | "minor" | "patch" | "none" | "unknown";
 
 export interface ChartSource {
@@ -47,4 +49,62 @@ export function classify(current: string, latest: string): UpdateType {
   if (l.major !== c.major) return "major";
   if (l.minor !== c.minor) return "minor";
   return "patch"; // patch differs, or same M.m.p with a newer prerelease/release
+}
+
+export interface DriftGroup {
+  chart: string;
+  repoURL: string;
+  members: { key: string; file: string; app: string; current: string }[];
+}
+
+export const normalizeRepo = (repoURL: string) =>
+  repoURL.trim().replace(/^oci:\/\//, "").replace(/\/+$/, "");
+
+export async function scanManifests(dir: string): Promise<{ sources: ChartSource[]; warnings: string[] }> {
+  const sources: ChartSource[] = [];
+  const warnings: string[] = [];
+  const glob = new Bun.Glob("**/*.{yml,yaml}");
+  const files = Array.from(glob.scanSync({ cwd: dir, onlyFiles: true })).sort();
+
+  for (const rel of files) {
+    const file = join(dir, rel);
+    const text = await Bun.file(file).text();
+    if (!/kind:\s*["']?Application["']?\s*$/m.test(text)) continue;
+
+    let parsed: unknown;
+    try {
+      parsed = Bun.YAML.parse(text);
+    } catch (err) {
+      warnings.push(`${file}: ${(err as Error).message}`);
+      continue;
+    }
+
+    for (const doc of Array.isArray(parsed) ? parsed : [parsed]) {
+      if (doc?.kind !== "Application" || !String(doc.apiVersion ?? "").startsWith("argoproj.io/") || !doc.spec) continue;
+      const candidates = [doc.spec.source, ...(Array.isArray(doc.spec.sources) ? doc.spec.sources : [])];
+      for (const s of candidates) {
+        if (!s?.chart || !s.repoURL || s.targetRevision === undefined) continue;
+        const app = String(doc.metadata?.name ?? s.chart);
+        sources.push({
+          key: makeKey(file, app, s.chart),
+          file,
+          app,
+          chart: String(s.chart),
+          repoURL: String(s.repoURL),
+          current: String(s.targetRevision),
+        });
+      }
+    }
+  }
+  return { sources, warnings };
+}
+
+export function findDrift(sources: ChartSource[]): DriftGroup[] {
+  const groups = new Map<string, DriftGroup>();
+  for (const s of sources) {
+    const id = `${normalizeRepo(s.repoURL)}|${s.chart}`;
+    if (!groups.has(id)) groups.set(id, { chart: s.chart, repoURL: normalizeRepo(s.repoURL), members: [] });
+    groups.get(id)!.members.push({ key: s.key, file: s.file, app: s.app, current: s.current });
+  }
+  return [...groups.values()].filter((g) => new Set(g.members.map((m) => m.current)).size > 1);
 }
