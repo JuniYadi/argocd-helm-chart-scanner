@@ -59,7 +59,7 @@ describe("listTrackers", () => {
 
   test("throws when gh cannot list", () => {
     const { exec } = fakeExec([[/list/, false]]);
-    expect(() => listTrackers(exec, "helm-update")).toThrow(/gh issue list failed/);
+    expect(() => listTrackers(exec, "helm-update")).toThrow("gh issue list failed: boom (tracker modes need issues and pull-requests read access)");
   });
 });
 
