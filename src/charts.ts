@@ -60,22 +60,22 @@ export interface DriftGroup {
 export const normalizeRepo = (repoURL: string) =>
   repoURL.trim().replace(/^oci:\/\//, "").replace(/\/+$/, "");
 
-export async function scanManifests(dir: string): Promise<{ sources: ChartSource[]; warnings: string[] }> {
+export async function scanManifests(dir: string): Promise<{ sources: ChartSource[]; warnings: { file: string; message: string }[] }> {
   const sources: ChartSource[] = [];
-  const warnings: string[] = [];
+  const warnings: { file: string; message: string }[] = [];
   const glob = new Bun.Glob("**/*.{yml,yaml}");
   const files = Array.from(glob.scanSync({ cwd: dir, onlyFiles: true })).sort();
 
   for (const rel of files) {
     const file = join(dir, rel);
     const text = await Bun.file(file).text();
-    if (!/kind:\s*["']?Application["']?\s*$/m.test(text)) continue;
+    if (!/^\s*kind:\s*["']?Application["']?\s*(#.*)?$/m.test(text)) continue;
 
     let parsed: unknown;
     try {
       parsed = Bun.YAML.parse(text);
     } catch (err) {
-      warnings.push(`${file}: ${(err as Error).message}`);
+      warnings.push({ file, message: (err as Error).message });
       continue;
     }
 
@@ -146,7 +146,17 @@ async function fetchHttpIndex(repoURL: string, chart: string, f: Fetch): Promise
           throw new Error(`unreachable: HTTP ${res.status} from ${url}; repository moved or removed?`);
         }
         if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
-        return Bun.YAML.parse(await res.text());
+        let text: string;
+        try {
+          text = await res.text();
+        } catch (err) {
+          throw new Error(`unreachable: ${url} (${(err as Error).message})`);
+        }
+        try {
+          return Bun.YAML.parse(text);
+        } catch (err) {
+          throw new Error(`invalid index.yaml at ${url}: ${(err as Error).message}`);
+        }
       })().catch((err) => {
         indexCache.delete(url); // a failed fetch must not poison later charts on the same repo
         throw err;
@@ -223,6 +233,7 @@ async function fetchOciTags(repoURL: string, chart: string, f: Fetch): Promise<C
       throw new Error(msg.startsWith("OCI token") || msg.startsWith("HTTP 401") ? msg : `unreachable: ${host} (${msg})`);
     }
     if (res.status === 404) throw new Error(`unreachable: HTTP 404 from ${url}; chart moved or removed?`);
+    if (res.status === 401) throw new Error(`HTTP 401 from ${url} (private registries are not supported)`);
     if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
     const body = (await res.json()) as { tags?: string[] | null };
     tags.push(...(body.tags ?? []));
@@ -231,7 +242,13 @@ async function fetchOciTags(repoURL: string, chart: string, f: Fetch): Promise<C
   }
 
   if (tags.length === 0) throw new Error(`no tags found for ${host}/${name}`);
-  const sources = host === "ghcr.io" && path ? [`https://github.com/${path.split("/").slice(0, 2).join("/")}`] : [];
+  let sources: string[] = [];
+  if (host === "ghcr.io" && path) {
+    const [owner, seg2] = path.split("/");
+    const candidates = [`https://github.com/${owner}/${chart}`];
+    if (seg2) candidates.push(`https://github.com/${owner}/${seg2}`);
+    sources = [...new Set(candidates)];
+  }
   return {
     versions: tags.map((t) => t.replace(/_/g, "+")), // Helm stores "+" as "_" in OCI tags
     deprecated: new Set(),
