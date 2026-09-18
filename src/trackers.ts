@@ -12,14 +12,19 @@ export type Exec = (args: string[], opts?: ExecOptions) => { ok: boolean; out: s
 export const run =
   (cmd: string, cwd?: string, timeoutMs = 60_000): Exec =>
   (args, opts = {}) => {
-    const p = Bun.spawnSync([cmd, ...args], {
-      cwd,
-      env: opts.env ? { ...process.env, ...opts.env } : undefined,
-      stdin: opts.input === undefined ? "ignore" : new TextEncoder().encode(opts.input),
-      stdout: "pipe",
-      stderr: "pipe",
-      timeout: timeoutMs,
-    });
+    let p: ReturnType<typeof Bun.spawnSync>;
+    try {
+      p = Bun.spawnSync([cmd, ...args], {
+        cwd,
+        env: opts.env ? { ...process.env, ...opts.env } : undefined,
+        stdin: opts.input === undefined ? "ignore" : new TextEncoder().encode(opts.input),
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: timeoutMs,
+      });
+    } catch (err) {
+      return { ok: false, out: "", err: `${cmd}: ${(err as Error).message}` };
+    }
     const err = p.exitCode === null ? `${cmd} timed out after ${timeoutMs} ms` : p.stderr.toString().trim();
     return { ok: p.exitCode === 0, out: p.stdout.toString().trim(), err };
   };
@@ -53,31 +58,57 @@ export function candidateTags(chart: string, version: string): string[] {
 
 const NOTES_LIMIT = 4000;
 
+interface Release {
+  tag_name: string;
+  html_url: string;
+  body?: string;
+}
+
+// One `gh api` call per repo per run: cached per `gh` instance, so fresh fakes in tests get fresh caches.
+const releaseCache = new WeakMap<Exec, Map<string, Release[]>>();
+
+function listReleases(gh: Exec, repo: string): Release[] {
+  let cache = releaseCache.get(gh);
+  if (!cache) {
+    cache = new Map();
+    releaseCache.set(gh, cache);
+  }
+  if (!cache.has(repo)) {
+    const r = gh(["api", `repos/${repo}/releases?per_page=100`]);
+    let releases: Release[] = [];
+    if (r.ok) {
+      try {
+        releases = JSON.parse(r.out);
+      } catch {
+        releases = []; // gh exited 0 but printed something unexpected
+      }
+    }
+    cache.set(repo, releases);
+  }
+  return cache.get(repo)!;
+}
+
 export function resolveReleaseInfo(gh: Exec, chart: string, current: string, latest: string, sources: string[]): ReleaseInfo {
   const artifactHubUrl = `https://artifacthub.io/packages/search?ts_query_web=${encodeURIComponent(chart)}`;
   const repos = githubRepos(sources);
   for (const repo of repos) {
+    const releases = listReleases(gh, repo);
+    const byTag = new Map(releases.map((r) => [r.tag_name, r]));
     for (const tag of candidateTags(chart, latest)) {
-      const r = gh(["release", "view", tag, "--repo", repo, "--json", "tagName,url,body"]);
-      if (!r.ok) continue;
-      let data: { tagName: string; url: string; body?: string };
-      try {
-        data = JSON.parse(r.out);
-      } catch {
-        continue; // gh exited 0 but printed something unexpected; try the next candidate
-      }
-      let notes = data.body?.trim() || undefined;
+      const rel = byTag.get(tag);
+      if (!rel) continue;
+      let notes = rel.body?.trim() || undefined;
       if (notes && notes.length > NOTES_LIMIT) {
         notes = `${notes.slice(0, NOTES_LIMIT)}\n\n*(Truncated. See the full notes via the release link.)*`;
       }
       const latestClean = latest.replace(/^v/i, "");
-      const guess = data.tagName.includes(latestClean) ? data.tagName.replace(latestClean, current.replace(/^v/i, "")) : undefined;
-      const curTag = guess && gh(["release", "view", guess, "--repo", repo, "--json", "tagName"]).ok ? guess : undefined;
+      const guess = rel.tag_name.includes(latestClean) ? rel.tag_name.replace(latestClean, current.replace(/^v/i, "")) : undefined;
+      const curTag = guess && (byTag.has(guess) || gh(["release", "view", guess, "--repo", repo, "--json", "tagName"]).ok) ? guess : undefined;
       return {
         repo,
-        tag: data.tagName,
-        url: data.url,
-        compareUrl: curTag ? `https://github.com/${repo}/compare/${curTag}...${data.tagName}` : undefined,
+        tag: rel.tag_name,
+        url: rel.html_url,
+        compareUrl: curTag ? `https://github.com/${repo}/compare/${curTag}...${rel.tag_name}` : undefined,
         notes,
         artifactHubUrl,
       };
@@ -118,6 +149,9 @@ export const branchName = (key: string) =>
 
 export const renderTitle = (r: ChartResult) =>
   `[Helm Update] ${r.chart} ${r.current} → ${r.latest} (${r.type.toUpperCase()}) in ${r.file}`;
+
+/** Length of the longest run of consecutive "~" in `text`, so a code fence can always outrun it. */
+export const longestTildeRun = (text: string) => Math.max(0, ...[...text.matchAll(/~+/g)].map((m) => m[0].length));
 
 export interface BodyContext {
   info: ReleaseInfo;
@@ -165,7 +199,8 @@ export function renderBody(r: ChartResult, ctx: BodyContext): string {
   out.push(``);
 
   if (info.notes) {
-    out.push(`<details>`, `<summary>📋 Upstream release notes</summary>`, ``, info.notes, ``, `</details>`, ``);
+    const fence = "~".repeat(Math.max(3, longestTildeRun(info.notes) + 1));
+    out.push(`<details>`, `<summary>📋 Upstream release notes</summary>`, ``, `${fence}text`, info.notes, fence, `</details>`, ``);
   }
 
   out.push(`### 📝 Checklist`, `- [ ] Review the upstream release notes`, `- [ ] Check breaking changes and deprecated \`values.yaml\` fields`);
@@ -237,15 +272,17 @@ export type Op =
 
 const sameText = (a: string, b: string) => a.replace(/\r\n/g, "\n").trim() === b.replace(/\r\n/g, "\n").trim();
 
-export function planTrackers(items: Planned[], open: Tracker[], results: ChartResult[]): Op[] {
+export function planTrackers(items: Planned[], open: Tracker[], results: ChartResult[], inScope: (key: string) => boolean = () => true): Op[] {
   const ops: Op[] = [];
   const byKey = new Map(results.map((r) => [r.key, r]));
   const find = (key: string, kind: Tracker["kind"]) => open.find((t) => t.key === key && t.kind === kind);
 
   for (const t of open) {
     const r = byKey.get(t.key);
-    if (!r) ops.push({ kind: "close", key: t.key, tracker: t, comment: "Chart source no longer found in the scanned manifests.", resolved: false });
-    else if (r.type === "none") ops.push({ kind: "close", key: t.key, tracker: t, comment: `Upgraded to \`${r.current}\`.`, resolved: true });
+    if (!r) {
+      // Only close a vanished source within the scanned scope; a run over one path must not touch another path's trackers.
+      if (inScope(t.key)) ops.push({ kind: "close", key: t.key, tracker: t, comment: "Chart source no longer found in the scanned manifests.", resolved: false });
+    } else if (r.type === "none") ops.push({ kind: "close", key: t.key, tracker: t, comment: `Upgraded to \`${r.current}\`.`, resolved: true });
     // ponytail: errors/unknown leave trackers alone, so a flaky registry never closes an issue.
   }
 
@@ -322,6 +359,7 @@ export function pushBranch(ctx: ApplyContext, branch: string, file: string, text
     ]);
     const header = `http.${ctx.serverUrl}/.extraheader`;
     const auth = Buffer.from(`x-access-token:${ctx.token}`).toString("base64");
+    console.log(`::add-mask::${auth}`);
     // The empty value resets headers inherited from actions/checkout before adding ours.
     git("push", ["-c", `${header}=`, "-c", `${header}=AUTHORIZATION: basic ${auth}`, "push", "-q", "--force", "origin", `${commit}:refs/heads/${branch}`]);
   } finally {
@@ -360,6 +398,7 @@ export function applyOps(ops: Op[], ctx: ApplyContext): ApplyResult {
         if (!r.ok) throw new Error(`gh issue create: ${r.err}`);
         url = lastLine(r.out);
         number = Number(url.split("/").pop());
+        if (Number.isNaN(number)) throw new Error(`could not read the issue number from gh output: ${r.out}`);
       } else {
         const branch = branchName(op.key);
         if (op.push) pushBranch(ctx, branch, op.file, op.newText, op.message);
@@ -381,6 +420,7 @@ export function applyOps(ops: Op[], ctx: ApplyContext): ApplyResult {
           }
           url = lastLine(r.out);
           number = Number(url.split("/").pop());
+          if (Number.isNaN(number)) throw new Error(`could not read the pr number from gh output: ${r.out}`);
         }
       }
       res.urls.set(op.key, url);
