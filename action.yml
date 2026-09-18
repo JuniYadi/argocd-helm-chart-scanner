@@ -1,0 +1,62 @@
+name: ArgoCD Helm Chart Scanner
+description: Detect outdated Helm charts in ArgoCD Applications, track them as issues or PRs, and keep a HELM_CHANGELOG.md.
+author: juniyadi
+branding:
+  icon: anchor
+  color: blue
+
+inputs:
+  path:
+    description: Directory scanned recursively for ArgoCD Application manifests.
+    required: false
+    default: "."
+  issue-types:
+    description: Comma list of update types (major, minor, patch) that get a tracking issue. Empty disables issues.
+    required: false
+    default: ""
+  pr-types:
+    description: Comma list of update types (major, minor, patch) that get a pull request bumping targetRevision. Takes precedence over issue-types.
+    required: false
+    default: ""
+  labels:
+    description: Comma list of labels for issues and PRs. The first label is used to find existing trackers.
+    required: false
+    default: helm-update
+  changelog-file:
+    description: Changelog path relative to the repository root. Empty disables the changelog.
+    required: false
+    default: HELM_CHANGELOG.md
+  token:
+    description: Token used by gh and git push. Pass a PAT or GitHub App token if PRs must trigger CI.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  updates:
+    description: JSON array of outdated chart sources.
+    value: ${{ steps.scan.outputs.updates }}
+  updates-count:
+    description: Number of outdated chart sources.
+    value: ${{ steps.scan.outputs.updates-count }}
+  changelog-updated:
+    description: "'true' when the changelog file was written, else 'false'."
+    value: ${{ steps.scan.outputs.changelog-updated }}
+
+runs:
+  using: composite
+  steps:
+    - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      with:
+        bun-version: 1.3.x
+    - id: scan
+      shell: bash
+      # Inputs go through env, never into the script text, to prevent injection.
+      run: bun "$GITHUB_ACTION_PATH/src/main.ts"
+      env:
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_ISSUE_TYPES: ${{ inputs.issue-types }}
+        INPUT_PR_TYPES: ${{ inputs.pr-types }}
+        INPUT_LABELS: ${{ inputs.labels }}
+        INPUT_CHANGELOG_FILE: ${{ inputs.changelog-file }}
+        GH_TOKEN: ${{ inputs.token }}
+        GH_REPO: ${{ github.repository }}
