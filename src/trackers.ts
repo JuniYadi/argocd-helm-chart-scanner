@@ -53,7 +53,18 @@ export function githubRepos(urls: string[]): string[] {
 
 export function candidateTags(chart: string, version: string): string[] {
   const v = version.replace(/^v/i, "");
-  return [`v${v}`, v, `${chart}-${v}`, `${chart}-v${v}`, `helm-v${v}`, `helm-${chart}-${v}`, `${chart}-helm-chart-${v}`, `v${chart}-${v}`];
+  return [
+    `v${v}`,
+    v,
+    `${chart}-${v}`,
+    `${chart}-v${v}`,
+    `helm-v${v}`,
+    `helm-${chart}-${v}`,
+    `${chart}-helm-chart-${v}`,
+    `v${chart}-${v}`,
+    `chart-v${v}`,
+    `chart-${v}`,
+  ];
 }
 
 const NOTES_LIMIT = 4000;
