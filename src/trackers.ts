@@ -7,7 +7,7 @@ export interface ExecOptions {
 export type Exec = (args: string[], opts?: ExecOptions) => { ok: boolean; out: string; err: string };
 
 export const run =
-  (cmd: string, cwd?: string): Exec =>
+  (cmd: string, cwd?: string, timeoutMs = 60_000): Exec =>
   (args, opts = {}) => {
     const p = Bun.spawnSync([cmd, ...args], {
       cwd,
@@ -15,8 +15,10 @@ export const run =
       stdin: opts.input === undefined ? "ignore" : new TextEncoder().encode(opts.input),
       stdout: "pipe",
       stderr: "pipe",
+      timeout: timeoutMs,
     });
-    return { ok: p.exitCode === 0, out: p.stdout.toString().trim(), err: p.stderr.toString().trim() };
+    const err = p.exitCode === null ? `${cmd} timed out after ${timeoutMs} ms` : p.stderr.toString().trim();
+    return { ok: p.exitCode === 0, out: p.stdout.toString().trim(), err };
   };
 
 // ---------- release notes ----------
@@ -55,12 +57,19 @@ export function resolveReleaseInfo(gh: Exec, chart: string, current: string, lat
     for (const tag of candidateTags(chart, latest)) {
       const r = gh(["release", "view", tag, "--repo", repo, "--json", "tagName,url,body"]);
       if (!r.ok) continue;
-      const data = JSON.parse(r.out) as { tagName: string; url: string; body?: string };
+      let data: { tagName: string; url: string; body?: string };
+      try {
+        data = JSON.parse(r.out);
+      } catch {
+        continue; // gh exited 0 but printed something unexpected; try the next candidate
+      }
       let notes = data.body?.trim() || undefined;
       if (notes && notes.length > NOTES_LIMIT) {
         notes = `${notes.slice(0, NOTES_LIMIT)}\n\n*(Truncated. See the full notes via the release link.)*`;
       }
-      const curTag = candidateTags(chart, current).find((t) => gh(["release", "view", t, "--repo", repo, "--json", "tagName"]).ok);
+      const latestClean = latest.replace(/^v/i, "");
+      const guess = data.tagName.includes(latestClean) ? data.tagName.replace(latestClean, current.replace(/^v/i, "")) : undefined;
+      const curTag = guess && gh(["release", "view", guess, "--repo", repo, "--json", "tagName"]).ok ? guess : undefined;
       return {
         repo,
         tag: data.tagName,
@@ -95,7 +104,8 @@ export function editTargetRevision(text: string, current: string, latest: string
 // ---------- markers, titles, bodies ----------
 
 export const marker = (key: string) => `<!-- helm-scanner:key=${key} -->`;
-export const readMarker = (body: string) => body.match(/<!-- helm-scanner:key=(.+?) -->/)?.[1] ?? null;
+// The marker is always the last line we write; the last match ignores look-alikes in upstream release notes.
+export const readMarker = (body: string) => [...body.matchAll(/<!-- helm-scanner:key=(.+?) -->/g)].pop()?.[1] ?? null;
 export const branchName = (key: string) =>
   "helm-scanner/" +
   key
