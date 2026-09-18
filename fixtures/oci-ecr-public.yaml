@@ -1,0 +1,9 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: aws-node-termination-handler
+spec:
+  source:
+    chart: aws-node-termination-handler
+    repoURL: public.ecr.aws/aws-ec2/helm
+    targetRevision: 0.21.0
