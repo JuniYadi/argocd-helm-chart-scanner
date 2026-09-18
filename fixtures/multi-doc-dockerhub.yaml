@@ -1,0 +1,19 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: redis-cache
+spec:
+  source:
+    chart: redis
+    repoURL: registry-1.docker.io/bitnamicharts
+    targetRevision: 18.0.0
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: redis-queue
+spec:
+  source:
+    chart: redis
+    repoURL: oci://registry-1.docker.io/bitnamicharts
+    targetRevision: 19.0.0
