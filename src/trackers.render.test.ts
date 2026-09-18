@@ -51,40 +51,63 @@ describe("release info", () => {
     ).toEqual(["stakater/Reloader", "kubernetes-sigs/external-dns"]);
   });
 
-  test("resolveReleaseInfo finds the target tag and a compare link", () => {
-    const { exec, calls } = fakeExec([
-      [/release view v2\.2\.17 /, JSON.stringify({ tagName: "v2.2.17", url: "https://github.com/stakater/Reloader/releases/tag/v2.2.17", body: "x".repeat(4100) })],
-      [/release view v2\.2\.5 /, JSON.stringify({ tagName: "v2.2.5" })],
-      [/release view/, false],
-    ]);
+  test("resolveReleaseInfo finds the target tag and a compare link with one call", () => {
+    const releases = [
+      { tag_name: "v2.2.17", html_url: "https://github.com/stakater/Reloader/releases/tag/v2.2.17", body: "x".repeat(4100) },
+      { tag_name: "v2.2.5", html_url: "https://github.com/stakater/Reloader/releases/tag/v2.2.5" },
+    ];
+    const { exec, calls } = fakeExec([[/^api repos\/stakater\/Reloader\/releases/, JSON.stringify(releases)]]);
     const info = resolveReleaseInfo(exec, "reloader", "2.2.5", "2.2.17", ["https://github.com/stakater/Reloader"]);
     expect(info.tag).toBe("v2.2.17");
+    expect(info.url).toBe("https://github.com/stakater/Reloader/releases/tag/v2.2.17");
     expect(info.compareUrl).toBe("https://github.com/stakater/Reloader/compare/v2.2.5...v2.2.17");
     expect(info.notes).toEndWith("*(Truncated. See the full notes via the release link.)*");
     expect(info.artifactHubUrl).toBe("https://artifacthub.io/packages/search?ts_query_web=reloader");
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(1);
   });
 
   test("resolveReleaseInfo derives the current tag from the matched naming scheme", () => {
-    const { exec, calls } = fakeExec([
-      [/release view reloader-2\.2\.17 /, JSON.stringify({ tagName: "reloader-2.2.17", url: "https://rel" })],
-      [/release view reloader-2\.2\.5 /, JSON.stringify({ tagName: "reloader-2.2.5" })],
-      [/release view/, false],
-    ]);
+    const releases = [
+      { tag_name: "reloader-2.2.17", html_url: "https://rel" },
+      { tag_name: "reloader-2.2.5", html_url: "https://rel-old" },
+    ];
+    const { exec, calls } = fakeExec([[/^api repos\/stakater\/Reloader\/releases/, JSON.stringify(releases)]]);
     const info = resolveReleaseInfo(exec, "reloader", "2.2.5", "2.2.17", ["https://github.com/stakater/Reloader"]);
+    expect(info.tag).toBe("reloader-2.2.17");
     expect(info.compareUrl).toBe("https://github.com/stakater/Reloader/compare/reloader-2.2.5...reloader-2.2.17");
-    expect(calls).toHaveLength(4); // v2.2.17, 2.2.17, reloader-2.2.17 (hit), then one compare check
+    expect(calls).toHaveLength(1); // both tags already known from the one releases call
   });
 
-  test("resolveReleaseInfo falls back to the releases page", () => {
-    const { exec } = fakeExec([[/release view/, false]]);
+  test("resolveReleaseInfo falls back to the releases page when nothing matches", () => {
+    const { exec } = fakeExec([[/^api repos\/a\/b\/releases/, JSON.stringify([{ tag_name: "unrelated", html_url: "https://x" }])]]);
     expect(resolveReleaseInfo(exec, "c", "1.0.0", "1.1.0", ["https://github.com/a/b"]).url).toBe("https://github.com/a/b/releases");
     expect(resolveReleaseInfo(exec, "c", "1.0.0", "1.1.0", []).url).toBeUndefined();
   });
 
   test("resolveReleaseInfo survives unparseable gh output", () => {
-    const { exec } = fakeExec([[/release view/, "not json"]]);
+    const { exec } = fakeExec([[/^api repos\/a\/b\/releases/, "not json"]]);
     expect(resolveReleaseInfo(exec, "c", "1.0.0", "1.1.0", ["https://github.com/a/b"]).url).toBe("https://github.com/a/b/releases");
+  });
+
+  test("resolveReleaseInfo caches the release list per repo per gh instance", () => {
+    const releases = [
+      { tag_name: "v1.1.0", html_url: "https://rel" },
+      { tag_name: "v1.0.0", html_url: "https://rel-old" },
+    ];
+    const { exec, calls } = fakeExec([[/^api repos\/a\/b\/releases/, JSON.stringify(releases)]]);
+    resolveReleaseInfo(exec, "c", "1.0.0", "1.1.0", ["https://github.com/a/b"]);
+    resolveReleaseInfo(exec, "c", "1.0.0", "1.1.0", ["https://github.com/a/b"]);
+    expect(calls.filter((c) => c.args[0] === "api")).toHaveLength(1);
+  });
+
+  test("resolveReleaseInfo makes one extra call when the derived current tag is not in the list", () => {
+    const { exec, calls } = fakeExec([
+      [/^api repos\/a\/b\/releases/, JSON.stringify([{ tag_name: "v1.1.0", html_url: "https://rel" }])],
+      [/^release view v1\.0\.0 /, JSON.stringify({ tagName: "v1.0.0" })],
+    ]);
+    const info = resolveReleaseInfo(exec, "c", "1.0.0", "1.1.0", ["https://github.com/a/b"]);
+    expect(info.compareUrl).toBe("https://github.com/a/b/compare/v1.0.0...v1.1.0");
+    expect(calls).toHaveLength(2);
   });
 });
 
@@ -133,6 +156,18 @@ describe("markers and rendering", () => {
     expect(readMarker(body)).toBe(result().key);
   });
 
+  test("release notes are rendered as an inert tilde-fenced code block", () => {
+    const notes = "@octocat fixed #45 ~~~~ </details> <!-- x";
+    const body = renderBody(result(), { info: { artifactHubUrl: "https://ah", notes }, drift: [], manual: false, pr: false });
+    const lines = body.split("\n");
+    const openIdx = lines.indexOf("~~~~~text");
+    const closeIdx = lines.indexOf("~~~~~");
+    expect(openIdx).toBeGreaterThan(-1);
+    expect(closeIdx).toBeGreaterThan(openIdx);
+    expect(lines.slice(openIdx + 1, closeIdx).join("\n")).toContain(notes);
+    expect(readMarker(body)).toBe(result().key);
+  });
+
   test("title", () => {
     expect(renderTitle(result())).toBe("[Helm Update] reloader 2.2.5 → 2.2.17 (PATCH) in tools/reloader/helm.yml");
   });
@@ -157,5 +192,11 @@ describe("run", () => {
     const r = run("sleep", undefined, 100)(["5"]);
     expect(r.ok).toBe(false);
     expect(r.err).toBe("sleep timed out after 100 ms");
+  });
+
+  test("a missing binary fails instead of throwing", () => {
+    const r = run("definitely-not-a-binary-xyz")([]);
+    expect(r.ok).toBe(false);
+    expect(r.err).toContain("definitely-not-a-binary-xyz");
   });
 });
