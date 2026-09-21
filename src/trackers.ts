@@ -169,6 +169,7 @@ export interface BodyContext {
   drift: DriftGroup[];
   manual: boolean;
   pr: boolean;
+  mentions?: string[];
 }
 
 export function renderBody(r: ChartResult, ctx: BodyContext): string {
@@ -196,8 +197,9 @@ export function renderBody(r: ChartResult, ctx: BodyContext): string {
     `| Current | \`${r.current}\` |`,
     `| Latest | \`${r.latest}\` |`,
     `| Update type | **${r.type.toUpperCase()}** |`,
-    ``,
   );
+  if (ctx.mentions?.length) out.push(`| Owners | ${ctx.mentions.join(" ")} |`);
+  out.push(``);
 
   const others = ctx.drift.find((g) => g.members.some((m) => m.key === r.key))?.members.filter((m) => m.key !== r.key) ?? [];
   if (others.length) out.push(`**Also deployed in:** ${others.map((m) => `\`${m.file}\` (${m.app}) at \`${m.current}\``).join(", ")}`, ``);
