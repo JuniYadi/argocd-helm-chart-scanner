@@ -209,6 +209,12 @@ describe("markers and rendering", () => {
     const prBody = renderBody(result(), { info: { artifactHubUrl: "https://ah" }, drift: [], manual: false, pr: true });
     expect(prBody).not.toContain("Update `targetRevision`");
     expect(prBody).not.toContain("[!WARNING]");
+    expect(prBody).not.toContain("| Owners |");
+  });
+
+  test("body lists owners when mentions are set", () => {
+    const body = renderBody(result(), { info: { artifactHubUrl: "https://ah" }, drift: [], manual: false, pr: false, mentions: ["@alice", "@acme/platform"] });
+    expect(body).toContain("| Owners | @alice @acme/platform |");
   });
 });
 
