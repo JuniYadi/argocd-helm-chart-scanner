@@ -109,6 +109,20 @@ steps:
 
 Each run only closes trackers and records changelog entries for keys under its own `path`. Both steps may share one changelog file.
 
+### Notify the owners
+
+List people or teams in `mentions`. Use one step per path to route each path to its own owners:
+
+```yaml
+  - uses: juniyadi/argocd-helm-chart-scanner@v1
+    with:
+      path: clusters/prod
+      issue-types: major,minor
+      mentions: acme/platform-team,alice
+```
+
+Owners are notified when an issue or PR is created. Open trackers get the Owners row on the next run. Team mentions only notify when the token can see the team. If the default `GITHUB_TOKEN` does not notify your team, pass a PAT or GitHub App token through `token`.
+
 ## Inputs
 
 | Input | Default | Description |
@@ -117,6 +131,7 @@ Each run only closes trackers and records changelog entries for keys under its o
 | `issue-types` | `''` | Comma list of `major`, `minor`, `patch` that get a tracking issue. |
 | `pr-types` | `''` | Comma list of `major`, `minor`, `patch` that get a PR bumping `targetRevision`. Wins over `issue-types`. |
 | `labels` | `helm-update` | Comma list of labels for issues and PRs. The **first** label is used to find existing trackers. Missing labels are created. |
+| `mentions` | `''` | Comma list of users or `org/team` (`@` optional) listed as **Owners** in every issue and PR body, so they get notified. |
 | `changelog-file` | `HELM_CHANGELOG.md` | Changelog path relative to the repo root. Empty disables it. |
 | `token` | `${{ github.token }}` | Token for `gh` and `git push`. |
 

@@ -12,6 +12,7 @@ describe("readInputs", () => {
       labels: ["helm-update"],
       changelogFile: "",
       token: "",
+      mentions: [],
     });
   });
 
@@ -28,6 +29,11 @@ describe("readInputs", () => {
     expect([...i.prTypes]).toEqual(["patch"]);
     expect(i.labels).toEqual(["helm-update", "dependencies"]);
     expect(i.changelogFile).toBe("HELM_CHANGELOG.md");
+  });
+
+  test("mentions accept users and org/team, with or without @", () => {
+    expect(readInputs({ INPUT_MENTIONS: "alice, @acme/platform-team ,@bob" }).mentions).toEqual(["@alice", "@acme/platform-team", "@bob"]);
+    expect(() => readInputs({ INPUT_MENTIONS: "alice,not a user" })).toThrow('mentions: invalid user or team "not a user"');
   });
 
   test("rejects unknown types, missing path and missing token", () => {

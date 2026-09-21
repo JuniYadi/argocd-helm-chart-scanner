@@ -22,6 +22,10 @@ inputs:
     description: Comma list of labels for issues and PRs. The first label is used to find existing trackers.
     required: false
     default: helm-update
+  mentions:
+    description: Comma list of users or org/team (for example alice,acme/platform) mentioned as owners in issues and PRs.
+    required: false
+    default: ""
   changelog-file:
     description: Changelog path relative to the repository root. Empty disables the changelog.
     required: false
@@ -57,6 +61,7 @@ runs:
         INPUT_ISSUE_TYPES: ${{ inputs.issue-types }}
         INPUT_PR_TYPES: ${{ inputs.pr-types }}
         INPUT_LABELS: ${{ inputs.labels }}
+        INPUT_MENTIONS: ${{ inputs.mentions }}
         INPUT_CHANGELOG_FILE: ${{ inputs.changelog-file }}
         GH_TOKEN: ${{ inputs.token }}
         GH_REPO: ${{ github.repository }}
