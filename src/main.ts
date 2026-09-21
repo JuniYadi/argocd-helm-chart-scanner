@@ -28,6 +28,7 @@ export interface Inputs {
   labels: string[];
   changelogFile: string;
   token: string;
+  mentions: string[];
 }
 
 export function readInputs(env: Record<string, string | undefined>): Inputs {
@@ -50,6 +51,9 @@ export function readInputs(env: Record<string, string | undefined>): Inputs {
   const token = env.GH_TOKEN ?? "";
   if ((issueTypes.size || prTypes.size) && !token) throw new Error("token: required when issue-types or pr-types is set.");
   const labels = list("INPUT_LABELS");
+  const mentions = list("INPUT_MENTIONS");
+  const badMention = mentions.find((m) => !/^@?[A-Za-z0-9][A-Za-z0-9-]*(\/[\w.-]+)?$/.test(m));
+  if (badMention) throw new Error(`mentions: invalid user or team "${badMention}". Use a comma list of user or org/team.`);
   return {
     path,
     issueTypes,
@@ -57,6 +61,7 @@ export function readInputs(env: Record<string, string | undefined>): Inputs {
     labels: labels.length ? labels : ["helm-update"],
     changelogFile: (env.INPUT_CHANGELOG_FILE ?? "").trim(),
     token,
+    mentions: mentions.map((m) => (m.startsWith("@") ? m : `@${m}`)),
   };
 }
 
@@ -170,7 +175,7 @@ async function main() {
         result: r,
         action: action as Planned["action"],
         title: renderTitle(r),
-        body: renderBody(r, { info, drift, manual: action === "manual", pr: action === "pr" }),
+        body: renderBody(r, { info, drift, manual: action === "manual", pr: action === "pr", mentions: inputs.mentions }),
         newText,
       });
     }
